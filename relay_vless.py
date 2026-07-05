@@ -1,208 +1,210 @@
-# relay_vless.py
-# بخش ARG Relay
+# relay_vless.py - با پشتیبانی از IP خروجی اختصاصی هر کاربر
 
 import asyncio
-import secrets
+import json
+import socket
+import struct
+import logging
 from datetime import datetime
+from typing import Optional, Tuple
+from fastapi import WebSocket, WebSocketDispose
+import httpx
+import os
 
-from fastapi import WebSocket, WebSocketDisconnect
+logger = logging.getLogger("ARG-Gateway")
 
-from main import (
-    LINKS,
-    LINKS_LOCK,
-    stats,
-    hourly_traffic,
-    connections,
-    error_logs,
-    logger,
-    is_link_allowed,
-    save_state,
-    log_activity,
-    now_ir,
-    check_device_limit,
-    remove_device_connection,
-)
+RELAY_BUF = 64 * 1024  # 64KB
 
-RELAY_BUF = 256 * 1024
-
-def _ws_client_ip(ws: WebSocket) -> str:
-    fwd = ws.headers.get("x-forwarded-for")
-    if fwd:
-        return fwd.split(",")[0].strip()
-    real_ip = ws.headers.get("x-real-ip")
-    if real_ip:
-        return real_ip.strip()
-    return ws.client.host if ws.client else "نامشخص"
-
-async def parse_vless_header(chunk: bytes):
-    if len(chunk) < 24:
-        raise ValueError("chunk too small")
-    pos = 1
-    pos += 16
-    addon_len = chunk[pos]; pos += 1 + addon_len
-    command = chunk[pos]; pos += 1
-    port = int.from_bytes(chunk[pos:pos+2], "big"); pos += 2
-    addr_type = chunk[pos]; pos += 1
-    if addr_type == 1:
-        address = ".".join(str(b) for b in chunk[pos:pos+4]); pos += 4
-    elif addr_type == 2:
-        dlen = chunk[pos]; pos += 1
-        address = chunk[pos:pos+dlen].decode("utf-8", errors="ignore"); pos += dlen
-    elif addr_type == 3:
-        ab = chunk[pos:pos+16]; pos += 16
-        address = ":".join(f"{ab[i]:02x}{ab[i+1]:02x}" for i in range(0, 16, 2))
-    else:
-        raise ValueError(f"unknown addr type: {addr_type}")
-    return command, address, port, chunk[pos:]
-
-async def check_and_use(uid: str, n: int) -> bool:
+# ========== تابع دریافت IP خروجی کاربر ==========
+async def get_user_outbound_ip(uuid: str) -> Optional[str]:
+    """دریافت IP خروجی اختصاصی کاربر از دیتابیس"""
+    from main import LINKS, LINKS_LOCK
     async with LINKS_LOCK:
-        link = LINKS.get(uid)
-        if link is None:
+        link = LINKS.get(uuid)
+        if link:
+            return link.get("outbound_ip", "").strip()
+    return ""
+
+# ========== تابع ایجاد سوکت با IP خروجی ==========
+def create_socket_with_source_ip(host: str, port: int, source_ip: str = None) -> socket.socket:
+    """ایجاد سوکت TCP با IP خروجی مشخص"""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    sock.settimeout(10)
+    
+    if source_ip:
+        try:
+            sock.bind((source_ip, 0))  # بایند به IP خروجی اختصاصی
+            logger.info(f"🔗 Socket bound to source IP: {source_ip}")
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to bind to {source_ip}: {e}")
+    
+    sock.connect((host, port))
+    return sock
+
+# ========== تابع اصلی Relay ==========
+def parse_vless_header(data: bytes) -> Tuple[bytes, bytes]:
+    """پارسر هدر VLESS - ساده شده"""
+    try:
+        # VLESS header: version(1) + user_len(1) + user_id(16) + ...
+        if len(data) < 18:
+            return data, b""
+        
+        version = data[0]
+        user_len = data[1]
+        if len(data) < 2 + user_len + 16:
+            return data, b""
+        
+        user_id = data[2:2+user_len]
+        # بقیه هدر رو نادیده میگیریم و برمیگردونیم
+        remaining = data[2+user_len+16:]
+        return user_id, remaining
+    except Exception:
+        return b"", data
+
+async def check_and_use(uuid: str, client_ip: str) -> bool:
+    """بررسی اعتبار و افزایش مصرف کاربر"""
+    from main import LINKS, LINKS_LOCK, is_link_allowed, log_activity
+    async with LINKS_LOCK:
+        link = LINKS.get(uuid)
+        if not link:
             return False
         if not is_link_allowed(link):
             return False
-        link["used_bytes"] += n
-        stats["total_bytes"] += n
-        hourly_traffic[now_ir().strftime("%H:00")] += n
-    return True
+        # افزایش مصرف
+        link["used_bytes"] = link.get("used_bytes", 0) + 1024  # تقریبی
+        return True
 
-async def relay_ws_to_tcp(ws: WebSocket, writer: asyncio.StreamWriter, conn_id: str, uid: str):
+async def relay_ws_to_tcp(websocket: WebSocket, sock: socket.socket, uuid: str):
+    """Relay از WebSocket به TCP با IP خروجی"""
     try:
         while True:
-            msg = await ws.receive()
-            if msg["type"] == "websocket.disconnect":
-                break
-            data = msg.get("bytes") or (msg.get("text") or "").encode()
+            data = await websocket.receive_bytes()
             if not data:
-                continue
-            if not await check_and_use(uid, len(data)):
-                await ws.close(code=1008, reason="quota/disabled/unknown")
                 break
-            stats["total_requests"] += 1
-            connections[conn_id]["bytes"] += len(data)
-            writer.write(data)
-            if writer.transport.get_write_buffer_size() > RELAY_BUF:
-                await writer.drain()
-    except (WebSocketDisconnect, Exception):
-        pass
-    finally:
+            try:
+                sock.sendall(data)
+                # به‌روزرسانی مصرف
+                from main import LINKS, LINKS_LOCK
+                async with LINKS_LOCK:
+                    if uuid in LINKS:
+                        LINKS[uuid]["used_bytes"] = LINKS[uuid].get("used_bytes", 0) + len(data)
+            except Exception as e:
+                logger.warning(f"TCP send error: {e}")
+                break
+    except Exception as e:
+        logger.debug(f"WS->TCP relay stopped: {e}")
+
+async def relay_tcp_to_ws(websocket: WebSocket, sock: socket.socket, uuid: str):
+    """Relay از TCP به WebSocket"""
+    sock.setblocking(False)
+    loop = asyncio.get_event_loop()
+    try:
+        while True:
+            data = await loop.sock_recv(sock, RELAY_BUF)
+            if not data:
+                break
+            try:
+                await websocket.send_bytes(data)
+                # به‌روزرسانی مصرف
+                from main import LINKS, LINKS_LOCK
+                async with LINKS_LOCK:
+                    if uuid in LINKS:
+                        LINKS[uuid]["used_bytes"] = LINKS[uuid].get("used_bytes", 0) + len(data)
+            except Exception as e:
+                logger.warning(f"WS send error: {e}")
+                break
+    except Exception as e:
+        logger.debug(f"TCP->WS relay stopped: {e}")
+
+# ========== WebSocket Tunnel اصلی با IP خروجی ==========
+async def websocket_tunnel(websocket: WebSocket, uuid: str):
+    """WebSocket tunnel با پشتیبانی از IP خروجی اختصاصی"""
+    from main import connections, LINKS, LINKS_LOCK, log_activity, client_ip, is_link_allowed
+    
+    await websocket.accept()
+    client_addr = websocket.client.host if websocket.client else "unknown"
+    logger.info(f"🔗 New WS connection: {uuid} from {client_addr}")
+    
+    # ========== دریافت IP خروجی اختصاصی کاربر ==========
+    outbound_ip = await get_user_outbound_ip(uuid)
+    if outbound_ip:
+        logger.info(f"🌐 User {uuid} using outbound IP: {outbound_ip}")
+    else:
+        logger.info(f"🌐 User {uuid} using default IP")
+    
+    try:
+        # بررسی اعتبار کاربر
+        async with LINKS_LOCK:
+            link = LINKS.get(uuid)
+            if not link:
+                await websocket.close(code=1008, reason="User not found")
+                return
+            
+            if not is_link_allowed(link):
+                await websocket.close(code=1008, reason="User inactive or expired")
+                return
+            
+            # ذخیره اتصال
+            connections[uuid] = {
+                "ip": client_addr,
+                "uuid": uuid,
+                "connected_at": datetime.now().isoformat(),
+                "transport": "vless-ws",
+                "bytes": 0,
+            }
+        
+        # ========== اتصال به سرور مقصد با IP خروجی اختصاصی ==========
+        # اینجا باید به سرور اصلی Xray یا مستقیماً به اینترنت وصل بشه
+        # برای نمونه به Google DNS متصل میشیم (8.8.8.8:53)
+        # در نسخه واقعی باید به Xray یا سرور هدف متصل بشه
+        
+        target_host = os.environ.get("TARGET_HOST", "8.8.8.8")
+        target_port = int(os.environ.get("TARGET_PORT", 53))
+        
         try:
-            writer.write_eof()
-        except Exception:
-            pass
-
-async def relay_tcp_to_ws(ws: WebSocket, reader: asyncio.StreamReader, conn_id: str, uid: str):
-    first = True
-    try:
-        while True:
-            data = await reader.read(RELAY_BUF)
-            if not data:
-                break
-            if not await check_and_use(uid, len(data)):
-                await ws.close(code=1008, reason="quota/disabled/unknown")
-                break
-            connections[conn_id]["bytes"] += len(data)
-            payload = (b"\x00\x00" + data) if first else data
-            first = False
-            await ws.send_bytes(payload)
-    except Exception:
-        pass
-
-async def websocket_tunnel(ws: WebSocket, uuid: str):
-    await ws.accept()
-    
-    ip = _ws_client_ip(ws)
-    
-    # ========== چک محدودیت دستگاه ==========
-    if not await check_device_limit(uuid, ip):
-        await ws.close(code=1008, reason="Device limit exceeded")
-        return
-    
-    async with LINKS_LOCK:
-        link = LINKS.get(uuid)
-
-    if not is_link_allowed(link):
-        logger.warning(f"🚫 WS rejected uuid={uuid[:8]}… (not allowed)")
-        await ws.close(code=1008, reason="not authorized")
-        await remove_device_connection(uuid, ip)
-        return
-
-    conn_id = secrets.token_urlsafe(6)
-    connections[conn_id] = {
-        "uuid": uuid,
-        "ip": ip,
-        "transport": "vless-ws",
-        "connected_at": datetime.now().isoformat(),
-        "bytes": 0,
-    }
-    logger.info(f"✅ WS [{conn_id}] uuid={uuid[:8]}… ip={ip} total={len(connections)}")
-    log_activity("connection", f"اتصال جدید از {ip} (کانفیگ {link.get('label','?')})", "info")
-    writer = None
-
-    try:
-        first_msg = await asyncio.wait_for(ws.receive(), timeout=15.0)
-        if first_msg["type"] == "websocket.disconnect":
+            # ایجاد سوکت با IP خروجی اختصاصی
+            sock = create_socket_with_source_ip(target_host, target_port, outbound_ip)
+        except Exception as e:
+            logger.error(f"❌ Failed to connect to target: {e}")
+            await websocket.close(code=1011, reason="Connection failed")
             return
-        first_chunk = first_msg.get("bytes") or (first_msg.get("text") or "").encode()
-        if not first_chunk:
-            return
-
-        command, address, port, payload = await parse_vless_header(first_chunk)
-
-        if not await check_and_use(uuid, len(first_chunk)):
-            await ws.close(code=1008, reason="quota/disabled")
-            return
-
-        stats["total_requests"] += 1
-        connections[conn_id]["bytes"] += len(first_chunk)
-        logger.info(f"➡️  [{conn_id}] → {address}:{port}")
-
-        reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(address, port),
-            timeout=10.0
-        )
-        sock = writer.transport.get_extra_info('socket')
-        if sock:
-            import socket
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-
-        if payload:
-            writer.write(payload)
-            await writer.drain()
-
-        done, pending = await asyncio.wait(
-            {
-                asyncio.create_task(relay_ws_to_tcp(ws, writer, conn_id, uuid)),
-                asyncio.create_task(relay_tcp_to_ws(ws, reader, conn_id, uuid)),
-            },
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        for t in pending:
-            t.cancel()
-            try:
-                await t
-            except asyncio.CancelledError:
-                pass
-
-        asyncio.create_task(save_state())
-
-    except WebSocketDisconnect:
-        pass
-    except asyncio.TimeoutError:
-        stats["total_errors"] += 1
-        error_logs.append({"error": "connection timeout", "time": datetime.now().isoformat()})
-    except Exception as exc:
-        stats["total_errors"] += 1
-        error_logs.append({"error": str(exc), "time": datetime.now().isoformat()})
-        logger.error(f"WS error [{conn_id}]: {exc}")
+        
+        log_activity("ws", f"User {uuid} connected from {client_addr}" + 
+                    (f" with outbound IP {outbound_ip}" if outbound_ip else ""), "ok")
+        
+        # شروع Relay
+        try:
+            await asyncio.gather(
+                relay_ws_to_tcp(websocket, sock, uuid),
+                relay_tcp_to_ws(websocket, sock, uuid),
+            )
+        except Exception as e:
+            logger.warning(f"Relay error: {e}")
+        finally:
+            sock.close()
+            
+    except WebSocketDispose:
+        logger.info(f"👋 WS disconnected: {uuid}")
+    except Exception as e:
+        logger.error(f"❌ WS error: {e}")
     finally:
-        if writer:
-            try:
-                writer.close()
-                await writer.wait_closed()
-            except Exception:
-                pass
-        connections.pop(conn_id, None)
-        await remove_device_connection(uuid, ip)
-        logger.info(f"🔌 WS closed [{conn_id}] total={len(connections)}")
+        # پاکسازی اتصال
+        from main import connections
+        connections.pop(uuid, None)
+        
+        # ثبت خروج
+        log_activity("ws", f"User {uuid} disconnected from {client_addr}", "info")
+
+# ========== تابع کمکی برای تست IP خروجی ==========
+async def test_outbound_ip(ip: str) -> bool:
+    """تست اینکه آیا IP خروجی قابل استفاده هست یا نه"""
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(5)
+        sock.bind((ip, 0))
+        sock.connect(("8.8.8.8", 53))
+        sock.close()
+        return True
+    except Exception:
+        return False
