@@ -1,4 +1,4 @@
-# pages.py - پنل عقاب (Eagle Panel)
+# pages.py - پنل عقاب (Eagle Panel) با صفحه ساب‌لینک
 
 LOGIN_HTML = r"""<!DOCTYPE html>
 <html lang="fa" dir="rtl">
@@ -689,5 +689,506 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (document.getElementById('pg-connections').classList.contains('on')) loadConnections();
   }, 5000);
 });
+</script>
+</body></html>"""
+
+
+# ===== صفحه ساب‌لینک عقابی =====
+def get_sub_page_html(uuid: str, link: dict) -> str:
+    """صفحه نمایش اطلاعات کاربر با طراحی عقابی"""
+    
+    used = link.get('used_bytes', 0)
+    limit = link.get('limit_bytes', 0)
+    active = link.get('active', True)
+    expired = link.get('expired', False)
+    label = link.get('label', 'کاربر')
+    fingerprint = link.get('fingerprint', 'chrome')
+    max_devices = link.get('max_devices', 0)
+    protocol = link.get('protocol', 'vless-ws')
+    
+    percent = 0
+    if limit > 0:
+        percent = min(100, (used / limit) * 100)
+    
+    expires_at = link.get('expires_at')
+    if expires_at:
+        try:
+            from datetime import datetime
+            exp_date = datetime.fromisoformat(expires_at.replace('Z', '+00:00'))
+            days_left = (exp_date - datetime.now().astimezone()).days
+            if days_left < 0:
+                days_left = 0
+        except:
+            days_left = 'نامشخص'
+    else:
+        days_left = 'نامحدود'
+    
+    is_allowed = active and not expired
+    vless_link = link.get('vless_link', '')
+    sub_url = link.get('sub_url', '')
+    
+    def fmt_bytes(b):
+        if not b or b == 0:
+            return '0 B'
+        if b < 1024:
+            return f'{b} B'
+        if b < 1024**2:
+            return f'{b/1024:.1f} KB'
+        if b < 1024**3:
+            return f'{b/1024**2:.2f} MB'
+        return f'{b/1024**3:.2f} GB'
+    
+    used_fmt = fmt_bytes(used)
+    limit_fmt = 'نامحدود' if limit == 0 else fmt_bytes(limit)
+    
+    return f"""<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>🦅 اطلاعات اشتراک - {label}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.19.0/dist/tabler-icons.min.css">
+<style>
+*{{margin:0;padding:0;box-sizing:border-box}}
+body{{
+    font-family:'Vazirmatn',sans-serif;
+    background:#0a0a0f;
+    min-height:100vh;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    padding:20px;
+    color:#F0F0FF;
+    position:relative;
+    overflow-x:hidden;
+}}
+.bg-fx{{
+    position:fixed;inset:0;
+    background:radial-gradient(ellipse 70% 50% at 30% 20%,rgba(59,130,246,0.06),transparent 60%),
+               radial-gradient(ellipse 60% 40% at 70% 80%,rgba(139,92,246,0.04),transparent 60%);
+    z-index:0;
+    pointer-events:none;
+}}
+.eagle-bg{{
+    position:fixed;
+    inset:0;
+    z-index:0;
+    pointer-events:none;
+    opacity:0.03;
+    font-size:300px;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    color:#F0F0FF;
+}}
+.orb{{
+    position:fixed;
+    border-radius:50%;
+    filter:blur(120px);
+    z-index:0;
+    animation:float 12s ease-in-out infinite;
+}}
+.orb1{{width:400px;height:400px;background:rgba(59,130,246,0.04);top:-150px;right:-100px}}
+.orb2{{width:300px;height:300px;background:rgba(139,92,246,0.04);bottom:-100px;left:-80px;animation-delay:6s}}
+@keyframes float{{0%,100%{{transform:translateY(0)}}50%{{transform:translateY(-30px)}}}}
+.card{{
+    position:relative;
+    z-index:10;
+    background:rgba(15,15,30,0.85);
+    backdrop-filter:blur(30px);
+    -webkit-backdrop-filter:blur(30px);
+    border:1px solid rgba(59,130,246,0.12);
+    border-radius:28px;
+    padding:40px 38px 34px;
+    max-width:480px;
+    width:100%;
+    box-shadow:0 0 100px rgba(59,130,246,0.04),0 25px 70px rgba(0,0,0,0.6);
+}}
+.brand{{
+    display:flex;
+    align-items:center;
+    gap:14px;
+    margin-bottom:28px;
+    padding-bottom:18px;
+    border-bottom:1px solid rgba(59,130,246,0.08);
+}}
+.brand-icon{{
+    width:52px;height:52px;border-radius:16px;
+    background:linear-gradient(135deg,#3B82F6,#8B5CF6);
+    display:flex;align-items:center;justify-content:center;
+    font-size:28px;
+    flex-shrink:0;
+    box-shadow:0 0 40px rgba(59,130,246,0.15);
+}}
+.brand-text .name{{
+    font-size:18px;font-weight:800;
+    background:linear-gradient(135deg,#3B82F6,#8B5CF6);
+    -webkit-background-clip:text;-webkit-text-fill-color:transparent;
+}}
+.brand-text .sub{{
+    font-size:10.5px;color:#4A4A6A;margin-top:2px;-webkit-text-fill-color:#4A4A6A;
+}}
+.user-header{{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    margin-bottom:6px;
+}}
+.user-name{{
+    font-size:24px;font-weight:800;color:#F0F0FF;
+    display:flex;align-items:center;gap:8px;
+}}
+.user-name .eagle{{font-size:20px}}
+.status{{
+    display:inline-flex;
+    align-items:center;
+    gap:5px;
+    padding:5px 14px;
+    border-radius:20px;
+    font-size:12px;
+    font-weight:700;
+}}
+.status.active{{
+    background:rgba(16,185,129,0.12);
+    color:#34D399;
+    border:1px solid rgba(16,185,129,0.15);
+}}
+.status.inactive{{
+    background:rgba(239,68,68,0.12);
+    color:#F87171;
+    border:1px solid rgba(239,68,68,0.15);
+}}
+.uuid-box{{
+    background:rgba(255,255,255,0.03);
+    border:1px solid rgba(255,255,255,0.04);
+    border-radius:10px;
+    padding:8px 12px;
+    font-size:10px;
+    font-family:monospace;
+    color:#4A4A6A;
+    word-break:break-all;
+    margin:6px 0 16px;
+    cursor:pointer;
+    transition:.15s;
+}}
+.uuid-box:hover{{
+    background:rgba(59,130,246,0.05);
+    border-color:rgba(59,130,246,0.1);
+}}
+.info-grid{{
+    display:grid;
+    gap:10px;
+    margin:16px 0;
+}}
+.info-item{{
+    background:rgba(255,255,255,0.02);
+    border:1px solid rgba(255,255,255,0.04);
+    border-radius:12px;
+    padding:13px 16px;
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    transition:.15s;
+}}
+.info-item:hover{{
+    background:rgba(255,255,255,0.03);
+    border-color:rgba(255,255,255,0.06);
+}}
+.info-label{{
+    font-size:12px;
+    color:#6A6A8A;
+    display:flex;
+    align-items:center;
+    gap:6px;
+}}
+.info-label i{{font-size:15px;color:#3B82F6}}
+.info-value{{
+    font-size:14px;
+    font-weight:700;
+    color:#F0F0FF;
+}}
+.info-value.used{{color:#8B5CF6}}
+.info-value.remain{{color:#34D399}}
+.info-value.proto{{
+    font-size:11px;
+    background:rgba(59,130,246,0.08);
+    padding:4px 12px;
+    border-radius:8px;
+    border:1px solid rgba(59,130,246,0.08);
+}}
+.progress{{
+    margin:18px 0 20px;
+}}
+.progress-bar{{
+    height:7px;
+    border-radius:5px;
+    background:rgba(255,255,255,0.05);
+    overflow:hidden;
+}}
+.progress-fill{{
+    height:100%;
+    border-radius:5px;
+    background:linear-gradient(90deg,#3B82F6,#8B5CF6);
+    width:{percent:.1f}%;
+    transition:width 1s ease;
+}}
+.progress-text{{
+    display:flex;
+    justify-content:space-between;
+    font-size:11px;
+    color:#6A6A8A;
+    margin-top:6px;
+}}
+.progress-text .pct{{font-weight:700;color:#F0F0FF}}
+.vless-section{{
+    background:rgba(255,255,255,0.02);
+    border:1px solid rgba(255,255,255,0.04);
+    border-radius:12px;
+    padding:14px 16px;
+    margin:16px 0;
+}}
+.vless-label{{
+    font-size:10px;
+    color:#6A6A8A;
+    font-weight:700;
+    text-transform:uppercase;
+    letter-spacing:.06em;
+    display:flex;
+    align-items:center;
+    gap:6px;
+    margin-bottom:8px;
+}}
+.vless-label i{{color:#8B5CF6;font-size:13px}}
+.vless-link{{
+    font-family:monospace;
+    font-size:10px;
+    color:#A78BFA;
+    word-break:break-all;
+    line-height:1.8;
+    background:rgba(0,0,0,0.2);
+    padding:10px 12px;
+    border-radius:8px;
+    border:1px solid rgba(139,92,246,0.06);
+}}
+.actions{{
+    display:flex;
+    gap:8px;
+    margin-top:14px;
+    flex-wrap:wrap;
+}}
+.btn{{
+    font-family:inherit;
+    font-size:12px;
+    font-weight:600;
+    border-radius:10px;
+    padding:9px 16px;
+    cursor:pointer;
+    display:inline-flex;
+    align-items:center;
+    gap:6px;
+    border:none;
+    transition:all .2s;
+    white-space:nowrap;
+    flex:1;
+    justify-content:center;
+}}
+.btn i{{font-size:14px}}
+.btn-primary{{
+    background:linear-gradient(135deg,#3B82F6,#8B5CF6);
+    color:#fff;
+    box-shadow:0 4px 20px rgba(59,130,246,0.2);
+}}
+.btn-primary:hover{{
+    transform:translateY(-2px);
+    box-shadow:0 8px 30px rgba(59,130,246,0.3);
+}}
+.btn-secondary{{
+    background:rgba(255,255,255,0.04);
+    border:1px solid rgba(255,255,255,0.06);
+    color:#8A8AAA;
+}}
+.btn-secondary:hover{{
+    background:rgba(255,255,255,0.08);
+    color:#F0F0FF;
+}}
+.btn-success{{
+    background:rgba(16,185,129,0.1);
+    border:1px solid rgba(16,185,129,0.15);
+    color:#34D399;
+}}
+.btn-success:hover{{
+    background:rgba(16,185,129,0.15);
+}}
+.footer{{
+    margin-top:22px;
+    padding-top:16px;
+    border-top:1px solid rgba(255,255,255,0.03);
+    text-align:center;
+    font-size:10px;
+    color:#4A4A6A;
+}}
+.footer .eagle{{
+    color:#3B82F6;
+    font-weight:700;
+}}
+.toast{{
+    position:fixed;
+    bottom:30px;
+    left:50%;
+    transform:translateX(-50%) translateY(60px);
+    background:rgba(15,15,30,0.95);
+    backdrop-filter:blur(20px);
+    border:1px solid rgba(59,130,246,0.12);
+    color:#F0F0FF;
+    border-radius:12px;
+    padding:12px 22px;
+    font-size:13px;
+    opacity:0;
+    transition:all .3s;
+    z-index:999;
+    pointer-events:none;
+    display:flex;
+    align-items:center;
+    gap:8px;
+    box-shadow:0 10px 40px rgba(0,0,0,0.4);
+}}
+.toast.show{{
+    opacity:1;
+    transform:translateX(-50%) translateY(0);
+}}
+.toast.ok{{
+    border-color:rgba(16,185,129,0.2);
+    color:#34D399;
+}}
+@media(max-width:520px){{
+    .card{{padding:28px 20px 24px}}
+    .user-name{{font-size:20px}}
+    .brand-icon{{width:44px;height:44px;font-size:22px}}
+    .info-item{{padding:11px 14px}}
+    .btn{{font-size:11px;padding:8px 12px}}
+}}
+</style>
+</head>
+<body>
+<div class="bg-fx"></div>
+<div class="eagle-bg">🦅</div>
+<div class="orb orb1"></div>
+<div class="orb orb2"></div>
+<div class="toast" id="toast"></div>
+
+<div class="card">
+    <div class="brand">
+        <div class="brand-icon">🦅</div>
+        <div class="brand-text">
+            <div class="name">پنل عقاب</div>
+            <div class="sub">اطلاعات اشتراک</div>
+        </div>
+    </div>
+
+    <div class="user-header">
+        <div class="user-name">
+            <span class="eagle">🦅</span>
+            {label}
+        </div>
+        <span class="status {'active' if is_allowed else 'inactive'}">
+            <i class="ti {'ti-circle-check' if is_allowed else 'ti-circle-x'}"></i>
+            {'فعال' if is_allowed else 'غیرفعال'}
+        </span>
+    </div>
+
+    <div class="uuid-box" onclick="copyUUID()" title="کلیک برای کپی UUID">
+        🔑 {uuid}
+    </div>
+
+    <div class="info-grid">
+        <div class="info-item">
+            <span class="info-label"><i class="ti ti-database"></i> مصرف</span>
+            <span class="info-value used">{used_fmt}</span>
+        </div>
+        <div class="info-item">
+            <span class="info-label"><i class="ti ti-package"></i> سهمیه</span>
+            <span class="info-value">{limit_fmt}</span>
+        </div>
+        <div class="info-item">
+            <span class="info-label"><i class="ti ti-calendar"></i> زمان باقیمانده</span>
+            <span class="info-value">{days_left if days_left == 'نامحدود' else f'{days_left} روز'}</span>
+        </div>
+        <div class="info-item">
+            <span class="info-label"><i class="ti ti-devices"></i> دستگاه‌ها</span>
+            <span class="info-value">{max_devices if max_devices > 0 else '∞'}</span>
+        </div>
+        <div class="info-item">
+            <span class="info-label"><i class="ti ti-fingerprint"></i> فینگرپرینت</span>
+            <span class="info-value proto">{fingerprint}</span>
+        </div>
+        <div class="info-item">
+            <span class="info-label"><i class="ti ti-settings"></i> پروتکل</span>
+            <span class="info-value proto">{protocol}</span>
+        </div>
+    </div>
+
+    <div class="progress">
+        <div class="progress-bar">
+            <div class="progress-fill" style="width:{percent:.1f}%"></div>
+        </div>
+        <div class="progress-text">
+            <span>میزان مصرف</span>
+            <span class="pct">{percent:.1f}%</span>
+        </div>
+    </div>
+
+    <div class="vless-section">
+        <div class="vless-label">
+            <i class="ti ti-link"></i> لینک کانفیگ (VLESS)
+        </div>
+        <div class="vless-link" id="vless-link">{vless_link}</div>
+    </div>
+
+    <div class="actions">
+        <button class="btn btn-primary" onclick="copyVless()">
+            <i class="ti ti-copy"></i> کپی لینک
+        </button>
+        <button class="btn btn-success" onclick="copySub()">
+            <i class="ti ti-link"></i> کپی ساب‌لینک
+        </button>
+        <button class="btn btn-secondary" onclick="showQR()">
+            <i class="ti ti-qrcode"></i> QR
+        </button>
+    </div>
+
+    <div class="footer">
+        <span class="eagle">🦅</span> پنل عقاب · اطلاعات شخصی شما محفوظ است
+    </div>
+</div>
+
+<script>
+const vless = `{vless_link}`;
+const subUrl = `{sub_url}`;
+const uuid = `{uuid}`;
+
+function toast(msg, type=''){{
+    const t=document.getElementById('toast');
+    t.textContent=msg;
+    t.className='toast show'+(type?' '+type:'');
+    setTimeout(()=>t.classList.remove('show'),2500);
+}}
+
+function copyVless(){{
+    navigator.clipboard.writeText(vless).then(()=>toast('✅ لینک کانفیگ کپی شد','ok'));
+}}
+
+function copySub(){{
+    navigator.clipboard.writeText(subUrl).then(()=>toast('✅ ساب‌لینک کپی شد','ok'));
+}}
+
+function copyUUID(){{
+    navigator.clipboard.writeText(uuid).then(()=>toast('✅ UUID کپی شد','ok'));
+}}
+
+function showQR(){{
+    window.open('https://api.qrserver.com/v1/create-qr-code/?size=300x300&data='+encodeURIComponent(vless),'_blank');
+}}
 </script>
 </body></html>"""
